@@ -75,20 +75,25 @@ def menu_principal():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nombre = update.effective_user.first_name
     texto = (
-        f"👋 ¡Hola *{nombre}*\\! Soy tu asistente de pendientes para *TMS, C\\.A\\.* 🛠️\n\n"
+        f"👋 ¡Hola *{nombre}*! Soy tu asistente de pendientes para *TMS, C.A.* 🛠️\n\n"
         "Puedo ayudarte a gestionar:\n"
-        "🔧 Actividades de campo \\| 📅 Reuniones\n"
-        "📋 Tareas admin \\| 🎫 Tickets FTTH\n\n"
-        "¿Qué hacemos hoy\\?"
+        "🔧 Actividades de campo | 📅 Reuniones\n"
+        "📋 Tareas admin | 🎫 Tickets FTTH\n\n"
+        "¿Qué hacemos hoy?"
     )
-    await update.message.reply_text(texto, parse_mode="MarkdownV2", reply_markup=menu_principal())
+    await update.message.reply_text(texto, parse_mode="Markdown", reply_markup=menu_principal())
 
 # ── Comando /menu ────────────────────────────────────────────────────────────────
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📌 Menú principal:", reply_markup=menu_principal())
 
 # ── Flujo: agregar pendiente ─────────────────────────────────────────────────────
-async def nuevo_pendiente(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def nuevo_pendiente_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.message.reply_text("📝 *¿Cuál es el título del pendiente?*\n\nEj: Revisión splitter zona norte", parse_mode="Markdown")
+    return TITULO
+
+async def nuevo_pendiente_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     context.user_data.clear()
@@ -164,8 +169,8 @@ async def recibir_descripcion(update: Update, context: ContextTypes.DEFAULT_TYPE
     pri = PRIORIDAD_EMOJI[nuevo["prioridad"]]
     cat = CATEGORIA_EMOJI[nuevo["categoria"]]
     await update.message.reply_text(
-        f"✅ *Pendiente guardado\\!*\n\n{pri}{cat} *{nuevo['titulo']}*",
-        parse_mode="MarkdownV2", reply_markup=menu_principal()
+        f"✅ *Pendiente guardado!*\n\n{pri}{cat} *{nuevo['titulo']}*",
+        parse_mode="Markdown", reply_markup=menu_principal()
     )
     context.user_data.clear()
     return ConversationHandler.END
@@ -178,7 +183,6 @@ async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Ver pendientes ───────────────────────────────────────────────────────────────
 async def ver_pendientes(update: Update, context: ContextTypes.DEFAULT_TYPE, filtro=None):
     query = update.callback_query
-    await query.answer()
     uid = str(update.effective_user.id)
     items = get_user_items(uid)
 
@@ -196,7 +200,6 @@ async def ver_pendientes(update: Update, context: ContextTypes.DEFAULT_TYPE, fil
         await query.message.reply_text(f"{titulo}\n\n_Sin pendientes en esta categoría._", parse_mode="Markdown", reply_markup=menu_principal())
         return
 
-    # Ordenar: no completados primero, luego por prioridad
     orden = {"alta": 0, "media": 1, "baja": 2}
     vis_sorted = sorted(vis, key=lambda x: (x["done"], orden.get(x["prioridad"], 9)))
     pendientes_reales = [i for i in vis_sorted if not i["done"]]
@@ -204,15 +207,12 @@ async def ver_pendientes(update: Update, context: ContextTypes.DEFAULT_TYPE, fil
     texto = f"*{titulo}* — {len(pendientes_reales)} activo(s)\n\n"
     texto += "\n\n".join(formatear_item(i, idx) for idx, i in enumerate(vis_sorted))
 
-    # Botones de acción
     teclado = []
-    for idx, it in enumerate(vis_sorted):
+    for it in vis_sorted:
         if not it["done"]:
-            lbl = f"✅ Completar: {it['titulo'][:25]}"
-            teclado.append([InlineKeyboardButton(lbl, callback_data=f"done_{it['id']}")])
+            teclado.append([InlineKeyboardButton(f"✅ {it['titulo'][:28]}", callback_data=f"done_{it['id']}")])
         else:
-            lbl = f"↩ Reabrir: {it['titulo'][:25]}"
-            teclado.append([InlineKeyboardButton(lbl, callback_data=f"reopen_{it['id']}")])
+            teclado.append([InlineKeyboardButton(f"↩ {it['titulo'][:28]}", callback_data=f"reopen_{it['id']}")])
         teclado.append([InlineKeyboardButton(f"🗑 Eliminar: {it['titulo'][:22]}", callback_data=f"del_{it['id']}")])
 
     teclado.append([InlineKeyboardButton("🏠 Menú", callback_data="inicio")])
@@ -222,7 +222,6 @@ async def ver_pendientes(update: Update, context: ContextTypes.DEFAULT_TYPE, fil
 # ── Resumen del día ──────────────────────────────────────────────────────────────
 async def resumen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     uid = str(update.effective_user.id)
     items = get_user_items(uid)
     total = len(items)
@@ -238,7 +237,6 @@ async def resumen(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ Completados: {completados}\n"
         f"🔴 Alta prioridad activa: {altas}\n\n"
     )
-
     por_cat = {}
     for i in items:
         if not i["done"]:
@@ -264,10 +262,10 @@ async def accion_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for it in items:
             if it["id"] == item_id:
                 it["done"] = not it["done"]
+                titulo = it["titulo"]
+                estado = "completado ✅" if it["done"] else "reabierto ↩"
                 break
         set_user_items(uid, items)
-        estado = "completado ✅" if next((i["done"] for i in items if i["id"] == item_id), False) else "reabierto ↩"
-        titulo = next((i["titulo"] for i in items if i["id"] == item_id), "")
         await query.message.reply_text(f"*{titulo}* marcado como {estado}.", parse_mode="Markdown", reply_markup=menu_principal())
 
     elif data.startswith("del_"):
@@ -279,12 +277,6 @@ async def accion_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "inicio":
         await query.message.reply_text("📌 Menú principal:", reply_markup=menu_principal())
-
-    elif data == "nuevo":
-        context.user_data.clear()
-        await query.message.reply_text("📝 *¿Cuál es el título del pendiente?*", parse_mode="Markdown")
-        return TITULO
-
     elif data == "ver_todos":
         await ver_pendientes(update, context, None)
     elif data == "ver_alta":
@@ -309,16 +301,19 @@ def main():
     app = ApplicationBuilder().token(token).build()
 
     conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(nuevo_pendiente, pattern="^nuevo$")],
+        entry_points=[
+            CommandHandler("nuevo", nuevo_pendiente_cmd),
+            CallbackQueryHandler(nuevo_pendiente_cb, pattern="^nuevo$"),
+        ],
         states={
-            TITULO: [MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_titulo)],
-            CATEGORIA: [CallbackQueryHandler(recibir_categoria, pattern="^cat_")],
-            PRIORIDAD: [CallbackQueryHandler(recibir_prioridad, pattern="^pri_")],
+            TITULO:     [MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_titulo)],
+            CATEGORIA:  [CallbackQueryHandler(recibir_categoria, pattern="^cat_")],
+            PRIORIDAD:  [CallbackQueryHandler(recibir_prioridad, pattern="^pri_")],
             FECHA: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_fecha_texto),
                 CallbackQueryHandler(recibir_fecha_skip, pattern="^sin_fecha$"),
             ],
-            DESCRIPCION: [MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_descripcion)],
+            DESCRIPCION:[MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_descripcion)],
         },
         fallbacks=[CommandHandler("cancelar", cancelar)],
         per_message=False,
@@ -329,8 +324,8 @@ def main():
     app.add_handler(conv)
     app.add_handler(CallbackQueryHandler(accion_item))
 
-    print("🤖 Bot TMS iniciado...")
-    app.run_polling()
+    print("🤖 Bot TMS iniciado correctamente...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
