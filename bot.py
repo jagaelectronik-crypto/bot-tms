@@ -1,13 +1,13 @@
 import os
 import json
+import asyncio
 import logging
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
-    MessageHandler, ContextTypes, ConversationHandler, filters,
-    JobQueue
+    MessageHandler, ContextTypes, ConversationHandler, filters
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -103,8 +103,7 @@ def menu_principal():
         [InlineKeyboardButton("📊 Resumen del día", callback_data="resumen")],
     ])
 
-# ── Recordatorios ────────────────────────────────────────────────────────────────
-async def recordatorio_manana(context: ContextTypes.DEFAULT_TYPE):
+async def recordatorio_manana(application):
     """Recordatorio matutino 8 AM — resumen completo de activos."""
     usuarios = cargar_usuarios()
     for uid, info in usuarios.items():
@@ -125,7 +124,7 @@ async def recordatorio_manana(context: ContextTypes.DEFAULT_TYPE):
             texto += f"{pri}{cat} *{it['titulo']}*{fecha}{venc}\n"
         texto += "\n_Usa /menu para gestionar tus pendientes._"
         try:
-            await context.bot.send_message(
+            await application.bot.send_message(
                 chat_id=info["chat_id"],
                 text=texto,
                 parse_mode="Markdown",
@@ -134,7 +133,7 @@ async def recordatorio_manana(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Error enviando recordatorio matutino a {uid}: {e}")
 
-async def recordatorio_tarde(context: ContextTypes.DEFAULT_TYPE):
+async def recordatorio_tarde(application):
     """Recordatorio vespertino 3 PM — solo pendientes sin completar."""
     usuarios = cargar_usuarios()
     for uid, info in usuarios.items():
@@ -153,7 +152,7 @@ async def recordatorio_tarde(context: ContextTypes.DEFAULT_TYPE):
             texto += f"{pri}{cat} {it['titulo']}{venc}\n"
         texto += "\n_¿Lograste avanzar hoy? Marca los completados con /menu_"
         try:
-            await context.bot.send_message(
+            await application.bot.send_message(
                 chat_id=info["chat_id"],
                 text=texto,
                 parse_mode="Markdown",
@@ -162,7 +161,7 @@ async def recordatorio_tarde(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Error enviando recordatorio vespertino a {uid}: {e}")
 
-async def recordatorio_alta_prioridad(context: ContextTypes.DEFAULT_TYPE):
+async def recordatorio_alta_prioridad(application):
     """Alerta cada hora si hay items de alta prioridad vencidos."""
     usuarios = cargar_usuarios()
     for uid, info in usuarios.items():
@@ -175,7 +174,7 @@ async def recordatorio_alta_prioridad(context: ContextTypes.DEFAULT_TYPE):
             texto += f"🔴🔧 *{it['titulo']}*\n   📆 Fecha: {it.get('fecha','Sin fecha')}\n\n"
         texto += "_Atiéndelos cuanto antes o márcalos como completados._"
         try:
-            await context.bot.send_message(
+            await application.bot.send_message(
                 chat_id=info["chat_id"],
                 text=texto,
                 parse_mode="Markdown",
@@ -183,6 +182,46 @@ async def recordatorio_alta_prioridad(context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             logger.error(f"Error enviando alerta alta prioridad a {uid}: {e}")
+
+# ── Scheduler propio (asyncio) ───────────────────────────────────────────────────
+async def scheduler_loop(application):
+    """
+    Loop infinito que revisa cada minuto si hay que disparar algún recordatorio.
+    Evita depender de JobQueue (que requiere python-telegram-bot[job-queue]
+    y falla en Python 3.13 por un bug de weakref).
+    """
+    ya_disparado_hoy = set()  # claves tipo "2026-06-30_08" para no repetir en el mismo minuto/hora
+
+    while True:
+        try:
+            ahora = datetime.now(TZ)
+            clave_manana = f"{ahora.date()}_manana"
+            clave_tarde = f"{ahora.date()}_tarde"
+            clave_hora = f"{ahora.date()}_{ahora.hour}_alta"
+
+            # 8:00 AM
+            if ahora.hour == 8 and ahora.minute == 0 and clave_manana not in ya_disparado_hoy:
+                await recordatorio_manana(application)
+                ya_disparado_hoy.add(clave_manana)
+
+            # 3:00 PM
+            if ahora.hour == 15 and ahora.minute == 0 and clave_tarde not in ya_disparado_hoy:
+                await recordatorio_tarde(application)
+                ya_disparado_hoy.add(clave_tarde)
+
+            # Alerta de alta prioridad — cada hora en punto, de 8 AM a 5 PM
+            if 8 <= ahora.hour <= 17 and ahora.minute == 0 and clave_hora not in ya_disparado_hoy:
+                await recordatorio_alta_prioridad(application)
+                ya_disparado_hoy.add(clave_hora)
+
+            # Limpieza diaria del set para que no crezca indefinidamente
+            if ahora.hour == 0 and ahora.minute == 1:
+                ya_disparado_hoy.clear()
+
+        except Exception as e:
+            logger.error(f"Error en scheduler_loop: {e}")
+
+        await asyncio.sleep(30)  # revisa cada 30 segundos
 
 # ── /start ───────────────────────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -409,29 +448,17 @@ async def accion_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "resumen":     await resumen(update, context)
 
 # ── Main ─────────────────────────────────────────────────────────────────────────
+async def post_init(application):
+    """Se ejecuta una vez que el bot arrancó: lanza el scheduler de recordatorios."""
+    application.create_task(scheduler_loop(application))
+    print("⏰ Scheduler de recordatorios iniciado (8 AM, 3 PM, alertas cada hora 8-17h)")
+
 def main():
     token = os.environ.get("TELEGRAM_TOKEN")
     if not token:
         raise ValueError("Falta la variable de entorno TELEGRAM_TOKEN")
 
-    app = ApplicationBuilder().token(token).build()
-
-    # Programar recordatorios
-    jq: JobQueue = app.job_queue
-
-    # ☀️ 8:00 AM hora Venezuela (UTC-4)
-    jq.run_daily(recordatorio_manana, time=time(8, 0, tzinfo=TZ), name="manana")
-
-    # 🕒 3:00 PM hora Venezuela
-    jq.run_daily(recordatorio_tarde, time=time(15, 0, tzinfo=TZ), name="tarde")
-
-    # 🚨 Alerta alta prioridad vencida — cada hora en jornada laboral (8 AM - 5 PM)
-    for hora in range(8, 18):
-        jq.run_daily(
-            recordatorio_alta_prioridad,
-            time=time(hora, 0, tzinfo=TZ),
-            name=f"alta_prioridad_{hora}"
-        )
+    app = ApplicationBuilder().token(token).post_init(post_init).build()
 
     conv = ConversationHandler(
         entry_points=[
